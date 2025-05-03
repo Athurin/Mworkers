@@ -4,9 +4,14 @@
 #include <mutex>
 #include <shared_mutex>
 #include <set>
+#include <fstream>
 
 // 定义一个全局的互斥锁，用于保护std::cout的访问
 std::mutex cout_mutex;
+
+// 定义一个全局的文件输出流
+std::ofstream output_file;
+
 
 void worker(int workerId, Locks& locks, int times, int N)
 {
@@ -24,10 +29,11 @@ void worker(int workerId, Locks& locks, int times, int N)
 
 			//收集所有需要锁定的索引
 			std::set<int> indicates = { j, i, (i + 1) % N, (i + 2) % N };
+			std::vector<int> sortedIndicates(indicates.begin(), indicates.end());
+			std::sort(sortedIndicates.begin(), sortedIndicates.end()); //按照索引的大小来进行上锁
 
-			// 尝试获取写锁（unique_lock）和读锁（shared_lock）
-			// 写锁 j 延迟上锁, 只是先封装对象
-			std::unique_lock<std::shared_mutex> lock_j(locks.getSharedMutex(j), std::defer_lock);
+
+			std::vector<std::unique_lock<std::shared_mutex>> lock_j; //写锁
 			std::vector<std::shared_lock<std::shared_mutex>> lock_is;//读锁数组
 
 			bool all_locked = false; //最开始都没有上锁
@@ -35,37 +41,49 @@ void worker(int workerId, Locks& locks, int times, int N)
 			while (all_locked == false) //只要不是全部都成功上锁
 			{
 				all_locked = true;
+				lock_j.clear();
+				lock_is.clear();
 
-				if (lock_j.try_lock()) //写锁 j 上锁成功
+				for (int idx : sortedIndicates)
 				{
-					for (int idx : indicates) //遍历候选项，将不为 j 的索引上读锁
+					if (idx == j)
 					{
-						if (idx != j)
+						lock_j.emplace_back(locks.getSharedMutex(idx), std::defer_lock);
+						if (!lock_j.back().try_lock()) //写锁没有成功
 						{
-							lock_is.emplace_back(locks.getSharedMutex(idx));
-							if (!lock_is.back().try_lock()) //只要任何一个读锁申请失败
-							{
-								all_locked = false;
-
-								//释放已经获取的读锁
-								for (auto& lock : lock_is)
-								{
-									if (lock.owns_lock())
-									{
-										lock.unlock();
-									}
-								}
-								lock_is.clear();
-								//释放写锁
-								lock_j.unlock();
-								break;
-							}
+							all_locked = false;
+							break;
 						}
 					}
-					if (all_locked == false) //如果没有全部上锁成功，就重试
+					else
 					{
-						std::this_thread::yield(); // 让出CPU，避免忙等待
+						lock_is.emplace_back(locks.getSharedMutex(idx), std::defer_lock);
+						if (!lock_is.back().try_lock()) //读锁有一个没有成功
+						{
+							all_locked = false;
+							break;
+						}
 					}
+				}
+
+				if (!all_locked)
+				{
+					// 释放已获取的锁
+					for (auto& lock : lock_j)
+					{
+						if (lock.owns_lock())
+						{
+							lock.unlock();
+						}
+					}
+					for (auto& lock : lock_is)
+					{
+						if (lock.owns_lock())
+						{
+							lock.unlock();
+						}
+					}
+					std::this_thread::yield();
 				}
 			}
 
@@ -75,14 +93,35 @@ void worker(int workerId, Locks& locks, int times, int N)
 
 			// 使用互斥锁保护std::cout的访问
 			std::lock_guard<std::mutex> lock(cout_mutex);
-			std::cout << "Worker " << workerId << ": i=" << i << ", j=" << j << ", Sj=" << sum << std::endl;
+			//std::cout << "Worker " << workerId << ": i=" << i << ", j=" << j << ", Sj=" << sum << std::endl;
+			// 同时将输出写入文件
+            if (output_file.is_open()) 
+			{
+                output_file << "Worker " << workerId << ": i=" << i << ", j=" << j << ", Sj=" << sum << std::endl;
+                output_file.flush(); // 确保立即写入文件
+            }
 
-			// 所有锁在超出作用域时自动释放
-			// 下一次循环会重新申请锁
+			// 释放所有锁
+			for (auto& lock : lock_j)
+			{
+				if (lock.owns_lock())
+				{
+					lock.unlock();
+				}
+			}
+			for (auto& lock : lock_is)
+			{
+				if (lock.owns_lock())
+				{
+					lock.unlock();
+				}
+			}
 		}
 		catch (const std::exception& e)
 		{
-			std::cerr << "Exception in worker " << workerId << ": " << e.what() << std::endl;
+			std::lock_guard<std::mutex> lock(cout_mutex);
+			output_file << "Exception in worker " << workerId << ": " << e.what() << std::endl;
+			output_file.flush(); // 确保立即写入文件
 		}
 	}
 }
