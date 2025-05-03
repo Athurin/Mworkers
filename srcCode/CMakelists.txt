@@ -4,6 +4,6 @@ PROJECT(Mworkers)
 
 add_executable(${PROJECT_NAME} 
 	main.cpp
+	locks.h
 	worker.h
-	worker.cpp
 )
